@@ -1,0 +1,37 @@
+# FastAPI & Server
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+python-multipart==0.0.20
+pydantic==2.10.4
+pydantic-settings==2.7.1
+
+# Database
+sqlalchemy==2.0.36
+aiosqlite==0.20.0
+
+# NLP
+spacy==3.8.4
+
+# ML
+xgboost==2.1.3
+scikit-learn==1.6.1
+numpy==1.26.4
+joblib==1.4.2
+
+# Graph
+networkx==3.4.2
+
+# SERP Collection
+duckduckgo-search==7.5.1
+httpx==0.28.1
+beautifulsoup4==4.12.3
+
+# LLM Integration
+ollama==0.4.7
+
+# Utilities
+cachetools==5.5.1
+python-dotenv==1.0.1
+hashlib-additional==1.0.1
+
+# CORS
