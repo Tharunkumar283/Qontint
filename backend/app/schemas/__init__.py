@@ -22,6 +22,7 @@ class Vertical(str, Enum):
     HEALTHCARE = "healthcare"
     FINANCE = "finance"
     LEGAL = "legal"
+    INSURANCE = "insurance"
 
 
 class PassFail(str, Enum):
