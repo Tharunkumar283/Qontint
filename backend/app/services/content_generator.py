@@ -1,6 +1,6 @@
 """
 MODULE 9 — AI Content Generation Engine
-Uses Ollama (free, local LLM) with intelligent mock fallback.
+Priority: Claude API (Anthropic) → Ollama (local) → Template
 Generates SEO-optimized content using authority intelligence.
 """
 import logging
@@ -12,33 +12,48 @@ logger = logging.getLogger(__name__)
 class ContentGenerator:
     """
     Generates intelligent, SEO-optimized content using:
-    - Authority entities from knowledge graph
-    - Intent alignment
-    - Relationship patterns
-    - Domain-specific knowledge (SaaS vertical)
+    - Claude API (Anthropic) — primary [set ANTHROPIC_API_KEY]
+    - Ollama (free local LLM) — secondary fallback
+    - Template-based generation — final fallback
 
-    Supports:
-    - Ollama (free local LLM) — primary
-    - Template-based generation — fallback
+    Priority order: Claude → Ollama → Template
     """
 
     def __init__(self):
         self._ollama_available = None
+        self._claude_available = None
+
+    async def _check_claude(self) -> bool:
+        """Check if Anthropic Claude API is available."""
+        if self._claude_available is not None:
+            return self._claude_available
+
+        try:
+            import anthropic
+            import os
+            api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+            if not api_key or api_key.startswith("sk-ant-YOUR"):
+                self._claude_available = False
+                return False
+            self._claude_available = True
+            logger.info("Claude API is available for content generation.")
+        except ImportError:
+            self._claude_available = False
+            logger.info("anthropic package not installed.")
+        return self._claude_available
 
     async def _check_ollama(self) -> bool:
         """Check if Ollama is available."""
         if self._ollama_available is not None:
             return self._ollama_available
-
         try:
             import ollama
-            models = ollama.list()
+            ollama.list()
             self._ollama_available = True
             logger.info("Ollama is available for content generation.")
         except Exception:
             self._ollama_available = False
-            logger.info("Ollama not available. Using template-based generation.")
-
+            logger.info("Ollama not available. Will use template generation.")
         return self._ollama_available
 
     async def generate(
@@ -53,23 +68,86 @@ class ContentGenerator:
     ) -> Dict:
         """
         Generate optimized SEO content.
-        Tries Ollama LLM first, falls back to template-based generation.
+        Priority: Claude API → Ollama → Template
         """
+        # Try Claude first
+        if await self._check_claude():
+            try:
+                return await self._generate_claude(
+                    keyword, vertical, intent,
+                    authority_entities, missing_entities, guidelines, graph_insights,
+                )
+            except Exception as e:
+                logger.warning(f"Claude generation failed: {e}. Trying Ollama.")
+
+        # Try Ollama
         if await self._check_ollama():
             try:
                 return await self._generate_ollama(
                     keyword, vertical, intent,
-                    authority_entities, missing_entities,
-                    guidelines, graph_insights,
+                    authority_entities, missing_entities, guidelines, graph_insights,
                 )
             except Exception as e:
                 logger.warning(f"Ollama generation failed: {e}. Using template.")
 
+        # Fallback: template
         return self._generate_template(
             keyword, vertical, intent,
-            authority_entities, missing_entities,
-            guidelines,
+            authority_entities, missing_entities, guidelines,
         )
+
+    async def _generate_claude(
+        self,
+        keyword: str,
+        vertical: str,
+        intent: str,
+        authority_entities: Optional[List[Dict]],
+        missing_entities: Optional[List[Dict]],
+        guidelines: Optional[str],
+        graph_insights: Optional[Dict],
+    ) -> Dict:
+        """Generate content using Anthropic Claude API."""
+        import anthropic
+        import os
+
+        api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+        client = anthropic.Anthropic(api_key=api_key)
+
+        prompt = self._build_prompt(
+            keyword, vertical, intent,
+            authority_entities, missing_entities, guidelines, graph_insights,
+        )
+
+        message = client.messages.create(
+            model="claude-3-5-haiku-20241022",
+            max_tokens=2048,
+            system=(
+                f"You are an expert SEO content writer specializing in the {vertical} industry. "
+                "Write comprehensive, authoritative content that naturally incorporates the specified "
+                "entities and concepts. Use markdown formatting with H2 and H3 headers, bullet lists, "
+                "and structured sections. Be informative and avoid generic filler text."
+            ),
+            messages=[{"role": "user", "content": prompt}],
+        )
+
+        content = message.content[0].text if message.content else ""
+
+        entities_used = []
+        if authority_entities:
+            content_lower = content.lower()
+            entities_used = [e["text"] for e in authority_entities if e["text"].lower() in content_lower]
+
+        return {
+            "content": content,
+            "keyword": keyword,
+            "intent": intent,
+            "entities_used": entities_used,
+            "authority_entities": authority_entities or [],
+            "estimated_novelty": 0.65,
+            "word_count": len(content.split()),
+            "generation_method": "claude",
+            "model": "claude-3-5-haiku-20241022",
+        }
 
     async def _generate_ollama(
         self,
@@ -85,11 +163,9 @@ class ContentGenerator:
         import ollama
         from app.core import settings
 
-        # Build intelligence-informed prompt
         prompt = self._build_prompt(
             keyword, vertical, intent,
-            authority_entities, missing_entities,
-            guidelines, graph_insights,
+            authority_entities, missing_entities, guidelines, graph_insights,
         )
 
         response = ollama.chat(
@@ -98,7 +174,7 @@ class ContentGenerator:
                 {
                     "role": "system",
                     "content": (
-                        "You are an expert SEO content writer specializing in the "
+                        f"You are an expert SEO content writer specializing in the "
                         f"{vertical} industry. Write comprehensive, authoritative content "
                         "that naturally incorporates the specified entities and concepts. "
                         "Use markdown formatting with headers, lists, and structured sections."
@@ -113,12 +189,7 @@ class ContentGenerator:
         entities_used = []
         if authority_entities:
             content_lower = content.lower()
-            entities_used = [
-                e["text"] for e in authority_entities
-                if e["text"].lower() in content_lower
-            ]
-
-        word_count = len(content.split())
+            entities_used = [e["text"] for e in authority_entities if e["text"].lower() in content_lower]
 
         return {
             "content": content,
@@ -127,7 +198,7 @@ class ContentGenerator:
             "entities_used": entities_used,
             "authority_entities": authority_entities or [],
             "estimated_novelty": 0.5,
-            "word_count": word_count,
+            "word_count": len(content.split()),
             "generation_method": "ollama",
         }
 
@@ -151,29 +222,24 @@ class ContentGenerator:
         if authority_entities:
             entity_list = ", ".join(e["text"] for e in authority_entities[:15])
             prompt_parts.append(
-                f"\nIMPORTANT - You MUST naturally incorporate these high-authority "
-                f"entities throughout the article: {entity_list}"
+                f"\nIMPORTANT — Naturally incorporate these high-authority entities: {entity_list}"
             )
 
         if missing_entities:
             missing_list = ", ".join(e["text"] for e in missing_entities[:5])
-            prompt_parts.append(
-                f"\nAlso include these recommended entities for better ranking: {missing_list}"
-            )
+            prompt_parts.append(f"\nAlso include: {missing_list}")
 
         if graph_insights:
             top = graph_insights.get("stats", {}).get("top_entities", [])
             if top:
                 insights = ", ".join(e["text"] for e in top[:5])
-                prompt_parts.append(
-                    f"\nTop authority entities in this topic space: {insights}"
-                )
+                prompt_parts.append(f"\nTop authority entities in this space: {insights}")
 
         intent_instructions = {
-            "informational": "Focus on educating the reader with definitions, examples, and step-by-step guides.",
+            "informational": "Focus on educating with definitions, examples, and step-by-step guides.",
             "transactional": "Include clear calls-to-action, pricing information, and conversion-focused content.",
-            "commercial": "Provide comparisons, pros/cons, and evaluation criteria to help readers make decisions.",
-            "navigational": "Focus on product features, getting started guides, and direct links.",
+            "commercial": "Provide comparisons, pros/cons, and evaluation criteria.",
+            "navigational": "Focus on product features, getting-started guides, and direct links.",
         }
         prompt_parts.append(f"\nContent Style: {intent_instructions.get(intent, '')}")
 
@@ -201,17 +267,13 @@ class ContentGenerator:
         missing_entities: Optional[List[Dict]],
         guidelines: Optional[str],
     ) -> Dict:
-        """
-        Template-based content generation fallback.
-        Uses authority intelligence to generate structured content.
-        """
+        """Template-based content generation fallback."""
         all_entities = []
         if authority_entities:
             all_entities.extend(authority_entities)
         if missing_entities:
             all_entities.extend(missing_entities)
 
-        # Group entities by type
         entity_groups = {}
         for e in all_entities:
             etype = e.get("type", "CONCEPT")
@@ -219,10 +281,8 @@ class ContentGenerator:
                 entity_groups[etype] = []
             entity_groups[etype].append(e["text"])
 
-        # Build sections based on entity groups
         sections = []
 
-        # Introduction
         sections.append(f"# The Complete Guide to {keyword.title()}\n")
         sections.append(
             f"In today's competitive {vertical} landscape, understanding "
@@ -231,95 +291,50 @@ class ContentGenerator:
             f"to advanced strategies.\n"
         )
 
-        # Key Concepts section
         concepts = entity_groups.get("CONCEPT", [])[:10]
         if concepts:
             sections.append("## Key Concepts\n")
-            sections.append(
-                f"When it comes to {keyword}, several core concepts form the foundation "
-                f"of a successful strategy:\n"
-            )
             for concept in concepts:
-                sections.append(
-                    f"- **{concept}**: A critical element in the {vertical} ecosystem "
-                    f"that directly impacts your approach to {keyword}."
-                )
+                sections.append(f"- **{concept}**: A critical element in the {vertical} ecosystem.")
             sections.append("")
 
-        # Metrics section
         metrics = entity_groups.get("METRIC", [])[:8]
         if metrics:
             sections.append("## Essential Metrics and KPIs\n")
-            sections.append(
-                f"Tracking the right metrics is crucial when implementing {keyword} strategies:\n"
-            )
             for metric in metrics:
-                sections.append(
-                    f"- **{metric}**: A key performance indicator that measures the "
-                    f"effectiveness of your {keyword} implementation."
-                )
+                sections.append(f"- **{metric}**: A key performance indicator for {keyword}.")
             sections.append("")
 
-        # Strategy section
         strategies = entity_groups.get("STRATEGY", [])[:6]
         if strategies:
             sections.append("## Proven Strategies\n")
-            sections.append(
-                f"The most successful approaches to {keyword} involve a combination "
-                f"of tested strategies:\n"
-            )
             for i, strategy in enumerate(strategies, 1):
                 sections.append(
                     f"### {i}. {strategy}\n\n"
                     f"Implementing {strategy} as part of your {keyword} approach "
-                    f"can significantly improve outcomes. Leading {vertical} companies "
-                    f"have demonstrated that {strategy} drives measurable results "
-                    f"when applied consistently.\n"
+                    f"drives measurable results when applied consistently.\n"
                 )
 
-        # Organizations section
-        orgs = entity_groups.get("ORG", [])[:5]
-        if orgs:
-            sections.append("## Industry Leaders\n")
-            sections.append(
-                f"Several organizations have set the standard for {keyword}:\n"
-            )
-            for org in orgs:
-                sections.append(f"- **{org}**: A recognized leader in the space.")
-            sections.append("")
-
-        # Best Practices
         sections.append(f"## Best Practices for {keyword.title()}\n")
         sections.append(
-            f"To maximize the impact of your {keyword} strategy, follow these "
-            f"best practices:\n"
+            f"To maximize the impact of your {keyword} strategy, follow these best practices:\n"
         )
-        sections.append(f"1. **Start with data-driven research** — Analyze your market and competitors")
-        sections.append(f"2. **Define clear objectives** — Set measurable goals aligned with your KPIs")
-        sections.append(f"3. **Iterate and improve** — Continuously refine your approach based on results")
-        sections.append(f"4. **Leverage automation** — Use tools and technology to scale efficiently")
-        sections.append(f"5. **Focus on quality** — Prioritize depth and accuracy over volume\n")
+        sections.append("1. **Start with data-driven research** — Analyze your market and competitors")
+        sections.append("2. **Define clear objectives** — Set measurable goals aligned with your KPIs")
+        sections.append("3. **Iterate and improve** — Continuously refine based on results")
+        sections.append("4. **Leverage automation** — Use tools to scale efficiently")
+        sections.append("5. **Focus on quality** — Prioritize depth and accuracy over volume\n")
 
-        # Conclusion
-        sections.append(f"## Conclusion\n")
+        sections.append("## Conclusion\n")
         sections.append(
-            f"Mastering {keyword} is a journey that requires a combination of "
-            f"strategic thinking, data-driven decision-making, and continuous improvement. "
-            f"By focusing on the key concepts, metrics, and strategies outlined in this guide, "
-            f"you can build a strong foundation for success in the {vertical} industry.\n"
-        )
-        sections.append(
-            f"Remember that the most successful {vertical} organizations treat {keyword} "
-            f"as an ongoing process rather than a one-time initiative. Start implementing "
-            f"these strategies today and measure your progress against the KPIs discussed above."
+            f"Mastering {keyword} requires strategic thinking, data-driven decision-making, and "
+            f"continuous improvement. By focusing on the key concepts, metrics, and strategies "
+            f"outlined in this guide, you can build a strong foundation for success in the {vertical} industry."
         )
 
         content = "\n".join(sections)
 
-        entities_used = [
-            e["text"] for e in all_entities
-            if e["text"].lower() in content.lower()
-        ]
+        entities_used = [e["text"] for e in all_entities if e["text"].lower() in content.lower()]
 
         return {
             "content": content,

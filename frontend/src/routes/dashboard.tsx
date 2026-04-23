@@ -3,7 +3,7 @@ import { useState, useEffect, useCallback } from "react";
 import { z } from "zod";
 import { MetricCard } from "@/components/MetricCard";
 import { EntityGraph } from "@/components/EntityGraph";
-import { analyzeContent, getRecommendations, generateContent } from "@/lib/api";
+import { analyzeContent, getRecommendations, generateContent, exportAnalysisJson, exportAnalysisCsv } from "@/lib/api";
 import type { AnalyzeResponse, RecommendationItem, Vertical, IntentType } from "@/lib/types";
 
 // ─── Route search params ────────────────────────────────────────────────
@@ -57,6 +57,24 @@ function Dashboard() {
   // Generated content state
   const [generatedContent, setGeneratedContent] = useState("");
   const [generating, setGenerating] = useState(false);
+
+  // Export state
+  const [exportOpen, setExportOpen] = useState(false);
+  const [exporting, setExporting] = useState(false);
+
+  const handleExport = async (format: "json" | "csv") => {
+    setExporting(true);
+    setExportOpen(false);
+    try {
+      const req = { keyword, vertical, content: draft !== DEFAULT_DRAFT ? draft : undefined };
+      if (format === "json") await exportAnalysisJson(req);
+      else await exportAnalysisCsv(req);
+    } catch (err) {
+      console.error("Export failed", err);
+    } finally {
+      setExporting(false);
+    }
+  };
 
   // ─── Initial pipeline: analyze a minimal seed content ──────────────────
   const runInitialAnalysis = useCallback(async () => {
@@ -160,9 +178,50 @@ function Dashboard() {
           </h1>
         </div>
         <div className="flex gap-2">
-          <button className="rounded-md border border-border-strong px-4 py-2 text-sm font-medium hover:bg-surface-raised/50">
-            Export
-          </button>
+          {/* Export dropdown */}
+          <div className="relative">
+            <button
+              id="export-btn"
+              onClick={() => setExportOpen((v) => !v)}
+              disabled={exporting || loading}
+              className="inline-flex items-center gap-1.5 rounded-md border border-border-strong px-4 py-2 text-sm font-medium transition-colors hover:bg-surface-raised/50 disabled:opacity-50"
+            >
+              {exporting ? (
+                <span className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-foreground/20 border-t-foreground" />
+              ) : (
+                <svg className="h-4 w-4" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5">
+                  <path d="M8 2v8M5 7l3 3 3-3M2 11v1.5A1.5 1.5 0 003.5 14h9A1.5 1.5 0 0014 12.5V11" strokeLinecap="round" strokeLinejoin="round" />
+                </svg>
+              )}
+              Export
+              <svg className="h-3 w-3" viewBox="0 0 12 12" fill="currentColor">
+                <path d="M3 4.5l3 3 3-3" stroke="currentColor" strokeWidth="1.2" fill="none" strokeLinecap="round" />
+              </svg>
+            </button>
+            {exportOpen && (
+              <>
+                <div className="fixed inset-0 z-10" onClick={() => setExportOpen(false)} />
+                <div className="absolute right-0 top-full z-20 mt-1 w-40 rounded-xl border border-border bg-surface shadow-elevated">
+                  <div className="p-1">
+                    <button
+                      id="export-json-btn"
+                      onClick={() => handleExport("json")}
+                      className="flex w-full items-center gap-2 rounded-md px-3 py-2 text-sm text-foreground/80 hover:bg-surface-raised/60"
+                    >
+                      <span className="font-mono text-xs text-accent">{"{}"}</span> JSON
+                    </button>
+                    <button
+                      id="export-csv-btn"
+                      onClick={() => handleExport("csv")}
+                      className="flex w-full items-center gap-2 rounded-md px-3 py-2 text-sm text-foreground/80 hover:bg-surface-raised/60"
+                    >
+                      <span className="font-mono text-xs text-accent">CSV</span> Spreadsheet
+                    </button>
+                  </div>
+                </div>
+              </>
+            )}
+          </div>
           <button
             className={`rounded-md px-4 py-2 text-sm font-semibold shadow-[0_0_18px_-6px_var(--accent)] transition-colors ${
               passedThreshold

@@ -5,9 +5,10 @@ python-multipart==0.0.20
 pydantic==2.10.4
 pydantic-settings==2.7.1
 
-# Database
+# Database — SQLite (default) & PostgreSQL (optional)
 sqlalchemy==2.0.36
 aiosqlite==0.20.0
+asyncpg==0.30.0
 
 # NLP
 spacy==3.8.4
@@ -27,11 +28,23 @@ httpx==0.28.1
 beautifulsoup4==4.12.3
 
 # LLM Integration
+anthropic==0.40.0
 ollama==0.4.7
+
+# Auth
+python-jose[cryptography]==3.3.0
+passlib[bcrypt]==1.7.4
+
+# Caching — Redis (optional, falls back to in-memory)
+redis==5.2.1
+
+# Graph DB — Neo4j (optional, falls back to NetworkX)
+neo4j==5.27.0
+
+# Web scraping — Playwright (optional JS-enabled, falls back to httpx)
+# After install run: playwright install chromium
+playwright==1.50.0
 
 # Utilities
 cachetools==5.5.1
 python-dotenv==1.0.1
-hashlib-additional==1.0.1
-
-# CORS

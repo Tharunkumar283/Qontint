@@ -1,7 +1,7 @@
 """
 MODULE 1 — SERP Intelligence Collector
-Uses DuckDuckGo Search (free, no API key needed) to collect search results.
-Falls back to mock data for development/demo mode.
+Priority: Ahrefs API → DuckDuckGo → Mock data
+Scraping: Playwright (full JS) → httpx + BeautifulSoup → snippet-only
 """
 import hashlib
 import logging
@@ -222,12 +222,20 @@ Best Practices:
 
 class SerpCollector:
     """
-    Collects SERP data using DuckDuckGo (free) with mock data fallback.
-    Supports full content scraping and deduplication.
+    Collects SERP data with priority:
+    1. Ahrefs API (set AHREFS_API_KEY)  — production grade, top 20 results
+    2. DuckDuckGo (free)                — good fallback, no API key needed
+    3. Mock data                        — demo / offline mode
+
+    Scraping priority:
+    1. Playwright (headless, full JS)   — set USE_PLAYWRIGHT=true
+    2. httpx + BeautifulSoup            — lightweight HTTP scraping
+    3. Snippet only                     — minimal, always available
     """
 
     def __init__(self):
         self._cache: Dict[str, Any] = {}
+        self._playwright_available: Optional[bool] = None
 
     async def collect(
         self,
@@ -238,7 +246,7 @@ class SerpCollector:
     ) -> List[Dict[str, Any]]:
         """
         Collect SERP results for a keyword.
-        Tries live DuckDuckGo first, falls back to mock data.
+        Priority: Ahrefs API → DuckDuckGo → mock data.
         """
         cache_key = f"{keyword}:{vertical}"
         if cache_key in self._cache:
@@ -248,16 +256,27 @@ class SerpCollector:
         results = []
 
         if use_live:
+            # 1. Try Ahrefs API first
             try:
-                results = await self._collect_live(keyword, max_results)
-                logger.info(f"Collected {len(results)} live results for '{keyword}'")
+                from app.core import settings
+                if settings.AHREFS_API_KEY:
+                    results = await self._collect_ahrefs(keyword, max_results, settings.AHREFS_API_KEY)
+                    logger.info(f"Ahrefs: {len(results)} results for '{keyword}'")
             except Exception as e:
-                logger.warning(f"Live SERP collection failed: {e}. Using mock data.")
-                results = []
+                logger.warning(f"Ahrefs collection failed: {e}")
 
+            # 2. Fall back to DuckDuckGo
+            if not results:
+                try:
+                    results = await self._collect_live(keyword, max_results)
+                    logger.info(f"DuckDuckGo: {len(results)} results for '{keyword}'")
+                except Exception as e:
+                    logger.warning(f"DuckDuckGo collection failed: {e}. Using mock data.")
+
+        # 3. Final fallback: mock data
         if not results:
             results = self._get_mock_data(keyword, vertical)
-            logger.info(f"Using {len(results)} mock results for '{keyword}'")
+            logger.info(f"Mock: {len(results)} results for '{keyword}'")
 
         # Generate content hashes and deduplicate
         seen_hashes = set()
@@ -276,8 +295,51 @@ class SerpCollector:
         self._cache[cache_key] = unique_results[:max_results]
         return unique_results[:max_results]
 
+    async def _collect_ahrefs(
+        self, keyword: str, max_results: int, api_key: str
+    ) -> List[Dict[str, Any]]:
+        """
+        Collect SERP data using the Ahrefs API.
+        Endpoint: https://api.ahrefs.com/v3/serp-overview
+        Requires: $99/mo API plan.
+        """
+        url = "https://api.ahrefs.com/v3/serp-overview"
+        params = {
+            "select": "url,title,description,traffic,backlinks,referring_domains",
+            "where": f"keyword={keyword}",
+            "limit": max_results,
+            "country": "us",
+        }
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Accept": "application/json",
+        }
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.get(url, params=params, headers=headers)
+            if resp.status_code != 200:
+                raise Exception(f"Ahrefs API {resp.status_code}: {resp.text[:200]}")
+            data = resp.json()
+
+        results = []
+        for i, item in enumerate(data.get("serp", [])[:max_results]):
+            page_url = item.get("url", "")
+            content = await self._scrape_content_playwright(page_url)
+            if not content:
+                content = await self._scrape_content(page_url)
+            results.append({
+                "title": item.get("title", ""),
+                "url": page_url,
+                "snippet": item.get("description", ""),
+                "content": content or item.get("description", ""),
+                "position": i + 1,
+                "backlinks": item.get("backlinks", 0),
+                "referring_domains": item.get("referring_domains", 0),
+                "source": "ahrefs",
+            })
+        return results
+
     async def _collect_live(self, keyword: str, max_results: int) -> List[Dict[str, Any]]:
-        """Collect live results from DuckDuckGo."""
+        """Collect live results from DuckDuckGo — free fallback."""
         try:
             from duckduckgo_search import DDGS
 
@@ -286,13 +348,18 @@ class SerpCollector:
                 search_results = list(ddgs.text(keyword, max_results=max_results))
 
                 for i, r in enumerate(search_results):
-                    content = await self._scrape_content(r.get("href", ""))
+                    url = r.get("href", "")
+                    # Try Playwright first, then httpx
+                    content = await self._scrape_content_playwright(url)
+                    if not content:
+                        content = await self._scrape_content(url)
                     results.append({
                         "title": r.get("title", ""),
-                        "url": r.get("href", ""),
+                        "url": url,
                         "snippet": r.get("body", ""),
                         "content": content or r.get("body", ""),
                         "position": i + 1,
+                        "source": "duckduckgo",
                     })
 
             return results
@@ -300,8 +367,51 @@ class SerpCollector:
             logger.warning("duckduckgo-search not installed. Using mock data.")
             return []
 
+    async def _scrape_content_playwright(self, url: str) -> Optional[str]:
+        """
+        Scrape full page content using Playwright headless browser.
+        Handles JavaScript-rendered pages that httpx cannot access.
+        Falls back silently if Playwright is not installed.
+        """
+        if not url or not url.startswith("http"):
+            return None
+
+        # Check/cache Playwright availability
+        if self._playwright_available is False:
+            return None
+
+        try:
+            from playwright.async_api import async_playwright
+        except ImportError:
+            if self._playwright_available is None:
+                logger.info("Playwright not installed — using httpx scraper. Install with: pip install playwright && playwright install chromium")
+                self._playwright_available = False
+            return None
+
+        try:
+            async with async_playwright() as p:
+                browser = await p.chromium.launch(headless=True)
+                page = await browser.new_page()
+                await page.set_extra_http_headers({
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+                })
+                await page.goto(url, wait_until="domcontentloaded", timeout=12000)
+                # Remove navigation/footer noise
+                await page.evaluate("""
+                    ['nav','header','footer','aside','script','style'].forEach(tag => {
+                        document.querySelectorAll(tag).forEach(el => el.remove());
+                    });
+                """)
+                text = await page.inner_text("body")
+                await browser.close()
+                self._playwright_available = True
+                return text[:6000] if text else None
+        except Exception as e:
+            logger.debug(f"Playwright scrape failed for {url}: {e}")
+            return None
+
     async def _scrape_content(self, url: str) -> Optional[str]:
-        """Scrape page content from URL."""
+        """Scrape page content using httpx + BeautifulSoup — fast, lightweight."""
         try:
             async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
                 response = await client.get(url, headers={
